@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+import argparse
+import socket
+import sys
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="TP1: Aplicación de transferencia de archivos (Upload)"
+    )
+
+    # Mutuamente excluyente verborreico y silencioso
+    grupoExcluyente = parser.add_mutually_exclusive_group()
+    grupoExcluyente.add_argument('-v', '--verbose', action='store_true', help='Aumentar verbosidad')
+    grupoExcluyente.add_argument('-q', '--quiet', action='store_true', help='Disminuir verbosidad')
+
+    # Obligatorios 
+    parser.add_argument('-H', '--host', type=str, default='127.0.0.1', help='Dirección IP del servidor')
+    parser.add_argument('-p', '--port', type=int, required=True, help='Puerto del servidor')
+    parser.add_argument('-s', '--src', type=str, required=True, help='Ruta del archivo a subir')
+    parser.add_argument('-n', '--name', type=str, required=True, help='Nombre del archivo en el servidor')
+    
+
+    parser.add_argument('-r', '--protocol', default='stop-and-wait', choices=['stop-and-wait', 'selective-repeat'], help='Protocolo de recuperación de errores')
+
+    args = parser.parse_args()
+
+    # argparse hace automaticamente el -h y el --help
+
+    # """"""Simulacion de subida""""""
+    print(f"Iniciando subida de: {args.src}")
+    print(f"Destino: {args.host}:{args.port} con el nombre {args.name}")
+    print(f"Usando protocolo: {args.protocol}")
+
+if __name__ == "__main__":
+    main()
