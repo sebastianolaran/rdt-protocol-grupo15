@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+import argparse
+import socket
+import sys
+import threading
+import queue
+
+# client_addr -> cola de datagramas entrantes de esa sesión
+sessions = {}
+sessions_lock = threading.Lock()
+
+
+def handle_session(addr, session_queue, server_socket, storage, verbose):
+    """Hilo trabajador: procesa todos los mensajes de un único cliente."""
+    if verbose:
+        print(f"[+] Nueva sesión: {addr}")
+
+    try:
+        while True:
+            data = session_queue.get()
+
+            if data is None:               ## rompe el bucle
+                break
+
+            message = data.decode(errors="replace")
+
+            if verbose:
+                print(f"[{addr}] recibido ({len(data)} bytes): {message!r}")
+
+            # RTA
+            server_socket.sendto(f"ACK: {message}".encode(), addr)
+
+    finally:
+        with sessions_lock:
+            sessions.pop(addr, None)
+        if verbose:
+            print(f"[-] Sesión cerrada: {addr}")
+
+
+def start_server(host, port, storage, verbose):
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server_socket.bind((host, port))
+    print(f"Escuchando en {host}:{port}  (storage: {storage})")
+
+    while True:
+        data, addr = server_socket.recvfrom(65535)
+
+        with sessions_lock:
+            if addr not in sessions:
+                # Primer datagrama de este cliente: abrir una sesión nueva
+                q = queue.Queue()
+                sessions[addr] = q
+                t = threading.Thread(
+                    target=handle_session,
+                    args=(addr, q, server_socket, storage, verbose),
+                    daemon=True,
+                )
+                t.start()
+
+            sessions[addr].put(data)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="TP1: Aplicación de arranque del servidor de carga-descarga"
+    )
+
+    grupoExcluyente = parser.add_mutually_exclusive_group()
+    grupoExcluyente.add_argument('-v', '--verbose', action='store_true', help='Aumentar verbosidad')
+    grupoExcluyente.add_argument('-q', '--quiet', action='store_true', help='Disminuir verbosidad')
+
+    parser.add_argument('-H', '--host', type=str, default='127.0.0.1', help='Dirección IP del servidor')
+    parser.add_argument('-p', '--port', type=int, required=True, help='Puerto del servidor')
+    parser.add_argument('-s', '--storage', type=str, required=True, help='Ruta donde iniciar el servidor')
+
+    args = parser.parse_args()
+
+    try:
+        start_server(args.host, args.port, args.storage, args.verbose)
+    except KeyboardInterrupt:
+        print("\nServidor finalizado por el usuario.")
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()
