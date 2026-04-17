@@ -2,6 +2,9 @@
 import argparse
 import socket
 import sys
+import os
+
+CHUNK_SIZE = 1008
 
 def main():
     parser = argparse.ArgumentParser(
@@ -27,9 +30,33 @@ def main():
     # argparse hace automaticamente el -h y el --help
 
     # """"""Simulacion de subida""""""
-    print(f"Iniciando subida de: {args.src}")
-    print(f"Destino: {args.host}:{args.port} con el nombre {args.name}")
-    print(f"Usando protocolo: {args.protocol}")
+    #print(f"Iniciando subida de: {args.src}")
+    #print(f"Destino: {args.host}:{args.port} con el nombre {args.name}")
+    #print(f"Usando protocolo: {args.protocol}")
+
+    if not os.path.exists(args.src):
+        print(f"[!] Error: El archivo {args.src} no existe.")
+        return
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        with open(args.src, "rb") as f:
+            numero_paquete = 0
+            while True:
+                chunk = f.read(CHUNK_SIZE)
+                if not chunk:
+                    break 
+                sock.sendto(chunk, (args.host, args.port))
+                numero_paquete += 1
+                # print(f"[*] Enviado paquete {numero_paquete}") # Comentado para no saturar
+
+            # AVISO BURDO DE FIN: Enviamos un paquete vacío para que el server salga del while
+            sock.sendto(b"", (args.host, args.port))
+            print("[+] Transferencia completa. Señal de fin enviada.")
+
+    except OSError as e:
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()

@@ -2,10 +2,37 @@
 import argparse
 import socket
 import sys
+import os
+
 
 def start_server(host, port, storage, verbose):
-    # Codigo plantilla, ni hay un stop
-    print(f"Escuchando en {host}:{port}...")
+
+    # Asegurarnos de que la carpeta de destino exista
+    if not os.path.exists(storage):
+        os.makedirs(storage)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((host, port))
+    print(f"[*] Servidor escuchando en {host}:{port}")
+
+    # archivo fijo (por ahora) para pruebas
+    file_path = os.path.join(storage, "recibido_prueba.jpg")
+    
+    try:
+        with open(file_path, "wb") as f:
+            print(f"[*] Esperando datos en {file_path}...")
+            while True:
+                data, addr = sock.recvfrom(2048)
+                
+                if not data: # Si llega el paquete de 0 bytes
+                    print("[+] Fin de transferencia detectado.")
+                    break
+                    
+                f.write(data)
+        
+        print(f"[!] Archivo guardado correctamente en {storage}")
+    finally:
+        sock.close()
 
 def main():
     parser = argparse.ArgumentParser(
