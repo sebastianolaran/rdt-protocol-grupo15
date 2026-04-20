@@ -3,36 +3,164 @@ import argparse
 import socket
 import sys
 import os
-
+import empaquetar
 
 def start_server(host, port, storage, verbose):
-
-    # Asegurarnos de que la carpeta de destino exista
     if not os.path.exists(storage):
         os.makedirs(storage)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((host, port))
-    print(f"[*] Servidor escuchando en {host}:{port}")
+    
+    print(f"[*] Servidor listo en {host}:{port}")
+    print(f"[*] Archivos en: {storage}")
 
-    # archivo fijo (por ahora) para pruebas
-    file_path = os.path.join(storage, "recibido_prueba.jpg")
+    try:
+        while True:
+            responder(storage, sock)
+            
+    except Exception as e:
+        print(f"[!] Error crítico en el loop del servidor: {e}")
+    finally:
+        sock.close()
+
+def responder_update(storage, sock, data_init, addr, d_len_init):
+    # El nombre del archivo viene en la data real del INIT
+    filename = data_init[8:8+d_len_init].decode()
+    file_path = os.path.join(storage, filename)
+    
+    # Respondemos con el OK (NP=0, ACK=1 e INIT=1)
+    print(f"[*] Handshake iniciado para: {filename}")
+    res_header = empaquetar.build_control_byte(init=True)
+    res_packet = empaquetar.create_packet(0, 1, res_header, filename.encode())
+    sock.sendto(res_packet, addr)
+
+    # 2. FASE DE TRANSFERENCIA
+    np_esperado = 1
     
     try:
         with open(file_path, "wb") as f:
-            print(f"[*] Esperando datos en {file_path}...")
             while True:
-                data, addr = sock.recvfrom(2048)
+                packet, addr = sock.recvfrom(empaquetar.MAX_PACKET_SIZE)
+                np_recibido, ack_recibido, flags, _, d_len = empaquetar.unpack_header(packet)
                 
-                if not data: # Si llega el paquete de 0 bytes
-                    print("[+] Fin de transferencia detectado.")
+                # Caso A: Es un paquete de cierre (CLOSE)
+                if empaquetar.is_close(flags):
+                    print(f"[+] Finalización recibida. Archivo {filename} cerrado.")
                     break
+                
+                # Caso B: Es el paquete que esperábamos (NP correcto)
+                if np_recibido == np_esperado:
+                    # Extraemos solo los bytes reales de data según d_len
+                    payload = packet[8:8+d_len]
+                    f.write(payload)
                     
-                f.write(data)
+                    ack_packet = empaquetar.create_packet(0, np_esperado + 1, 0, b"")
+                    sock.sendto(ack_packet, addr)
+                    
+                    np_esperado += 1
+                
+                # Caso C: Paquete duplicado o viejo (BAD_PACKET potencial)
+                else:
+                    # Mandamos el último ACK válido para que el cliente se sincronice
+                    print(f"[!] NP inesperado: {np_recibido} (esperaba {np_esperado})")
+                    ack_reintento = empaquetar.create_packet(0, np_esperado, 0, b"")
+                    sock.sendto(ack_reintento, addr)
         
-        print(f"[!] Archivo guardado correctamente en {storage}")
-    finally:
-        sock.close()
+        print(f"[!] Transferencia exitosa de {filename}")
+        
+    except Exception as e:
+        print(f"[!] Error durante la transferencia: {e}")
+
+def responder_download(storage, sock, data_init, addr, d_len_init):
+    """
+    Maneja la lógica de envío de un archivo desde el servidor al cliente (Download).
+    Implementa Stop & Wait: envía un paquete y espera el ACK antes de seguir.
+    """
+    # 1. EXTRAER NOMBRE Y VALIDAR ARCHIVO
+    # El nombre viene en la data real del paquete INIT 
+    filename = data_init[8:8+d_len_init].decode()
+    file_path = os.path.join(storage, filename)
+    
+    if not os.path.exists(file_path):
+        print(f"[!] Error: El archivo '{filename}' no existe en storage.")
+        header_err = empaquetar.build_control_byte(error=empaquetar.FILE_ERROR)
+        pkt_err = empaquetar.create_packet(0, 0, header_err, b"")
+        sock.sendto(pkt_err, addr)
+        return
+
+    # 2. HANDSHAKE: Confirmamos el INIT del cliente
+    print(f"[*] Handshake iniciado. Enviando confirmación para: {filename}")
+    # Según tu protocolo, respondemos con INIT=1, NP=0 y ACK=1 
+    res_header = empaquetar.build_control_byte(init=True)
+    res_packet = empaquetar.create_packet(0, 1, res_header, filename.encode())
+    sock.sendto(res_packet, addr)
+
+    # 3. FASE DE TRANSFERENCIA
+    np_actual = 1
+    ultimo_ack_cliente = 1 
+
+    try:
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(empaquetar.MAX_DATA_SIZE)
+                
+                if not chunk:
+                    # FIN DE ARCHIVO: Mandamos paquete con flag CLOSE (C=1)
+                    print(f"[*] Fin de archivo alcanzado. Enviando CLOSE...")
+                    header_close = empaquetar.build_control_byte(close=True)
+                    pkt_close = empaquetar.create_packet(np_actual, 0, header_close, b"")
+                    sock.sendto(pkt_close, addr)
+                    break 
+
+                # CREAR Y ENVIAR PAQUETE DE DATOS
+                # NP es el número de secuencia, ACK puede ser 0 o el último recibido
+                packet = empaquetar.create_packet(np_actual, ultimo_ack_cliente, 0, chunk)
+                sock.sendto(packet, addr)
+                
+                # (Stop & Wait)
+                try:
+                    # Esperamos el ACK del cliente
+                    ack_raw, cliente_addr = sock.recvfrom(empaquetar.MAX_PACKET_SIZE)
+                    np_res, ack_res, flags_res, _, _ = empaquetar.unpack_header(ack_raw)
+                    
+                    # Si el cliente nos pide el NP_ACTUAL + 1, significa que recibió bien
+                    if ack_res == np_actual + 1:
+                        np_actual += 1
+                        ultimo_ack_cliente = np_res # Guardamos el NP del cliente por si las dudas
+                    else:
+                        # Si el ACK no es el que esperamos, retransmitimos
+                        print(f"[!] ACK incorrecto ({ack_res}). Reintentando paquete {np_actual}...")
+                        # Retrocedemos el puntero del archivo para volver a leer el mismo pedazo
+                        f.seek(-len(chunk), 1) 
+                        
+                except Exception as e:
+                    print(f"[!] Error esperando ACK: {e}")
+                    f.seek(-len(chunk), 1)
+
+        # 4. CIERRE FINAL
+        final_ack, _ = sock.recvfrom(empaquetar.MAX_PACKET_SIZE)
+        print(f"[!] Transferencia de '{filename}' finalizada con éxito.")
+
+    except Exception as e:
+        print(f"[!] Error crítico durante responder_download: {e}")
+
+def responder(storage, sock):
+    print("[*] Servidor a la espera de un nuevo cliente...")
+    
+    # 1. HANDSHAKET
+    data_init, addr = sock.recvfrom(empaquetar.MAX_PACKET_SIZE)
+    np, ack, flags, _, d_len = empaquetar.unpack_header(data_init)
+    
+    # Validamos que sea un INIT de UPLOAD (download no programado aún)
+    if empaquetar.is_init(flags) and empaquetar.is_upload(flags):
+        responder_update(storage, sock, data_init, addr, d_len)
+    elif empaquetar.is_init(flags) and empaquetar.is_download(flags):
+        responder_download(storage, sock, data_init, addr, d_len)
+    else:
+        print(f"[!] Error: Se esperaba INIT de Upload desde {addr}")
+        return
+
 
 def main():
     parser = argparse.ArgumentParser(

@@ -2,6 +2,8 @@
 import argparse
 import socket
 import sys
+import os
+import empaquetar
 
 def main():
     parser = argparse.ArgumentParser(
@@ -24,12 +26,64 @@ def main():
 
     args = parser.parse_args()
 
-    # argparse hace automaticamente el -h y el --help
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    # """"""Simulacion de descarga""""""
-    print(f"Iniciando descarga a: {args.dst}")
-    print(f"Destino: {args.host}:{args.port} con el nombre {args.name}")
-    print(f"Usando protocolo: {args.protocol}")
+    try:
+        with open(args.dst, "wb") as f:
+            # --- FASE 1: HANDSHAKE ---
+            # Todavia no se tiene en cuenta que hay que avisarle
+            # al server por un path mal o un archivo que no existe
+            # ni tampoco el timeout
+            np_cliente = 0
+            
+            header_init = empaquetar.build_control_byte(init=True, download=True)
+            packet_init = empaquetar.create_packet(np_cliente, 0, header_init, args.name.encode())
+            sock.sendto(packet_init, (args.host, args.port))
+            
+            res_init, addr = sock.recvfrom(empaquetar.MAX_PACKET_SIZE)
+            np_res, ack_res, flags_res, _, _ = empaquetar.unpack_header(res_init)
+            
+            # Validamos que el servidor nos dio el OK
+            if not (empaquetar.is_init(flags_res) and ack_res == 1):
+                print("[!] Error en el handshake. Abortando.")
+                return
+
+            # --- FASE 2: TRANSFERENCIA ---
+            np_esperado = 1
+            np_cliente += 1 
+            while True:
+                # Recibimos paquete de datos del servidor
+                res_data, addr = sock.recvfrom(empaquetar.MAX_PACKET_SIZE)
+                np_res, ack_res, flags_res, _, d_len = empaquetar.unpack_header(res_data)
+                
+                # A: ¿Es el fin de la transferencia?
+                if empaquetar.is_close(flags_res):
+                    print("[+] El servidor notificó fin de archivo.")
+                    break
+                
+                # B: ¿Es el paquete que esperábamos? (Stop & Wait)
+                if np_res == np_esperado:
+                    # Escribimos SOLO los bytes reales recibidos
+                    data = res_data[8:8+d_len]
+                    f.write(data)
+                    
+                    # Mandamos el ACK pidiendo el siguiente
+                    np_esperado += 1
+                    # En download, el cliente manda ACK = próximo paquete que quiere
+                    ack_packet = empaquetar.create_packet(np_cliente, np_esperado, 0, b"")
+                    sock.sendto(ack_packet, (args.host, args.port))
+                    np_cliente += 1
+                else:
+                    # Si llegó algo raro (un NP viejo), repetimos el último ACK
+                    ack_reintento = empaquetar.create_packet(np_cliente, np_esperado, 0, b"")
+                    sock.sendto(ack_reintento, (args.host, args.port))
+        # --- FASE 3: CIERRE ---
+        header_close = empaquetar.build_control_byte(close=True)
+        sock.sendto(empaquetar.create_packet(np_cliente, 0, header_close, b""), (args.host, args.port))
+        print("[+] Transferencia completa. Señal de fin enviada.")
+
+    except OSError as e:
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()

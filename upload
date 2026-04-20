@@ -3,8 +3,10 @@ import argparse
 import socket
 import sys
 import os
+import empaquetar
 
-CHUNK_SIZE = 1008
+def coinciden_paquetes(ack, ack_esperado):
+    return ack == ack_esperado
 
 def main():
     parser = argparse.ArgumentParser(
@@ -42,18 +44,49 @@ def main():
 
     try:
         with open(args.src, "rb") as f:
-            numero_paquete = 0
+            # --- FASE 1: HANDSHAKE ---
+            # Todavia no se tiene en cuenta que hay que avisarle
+            # al server por un path mal o un archivo que no existe
+            # ni tampoco el timeout
+            np_cliente = 0
+            ack_cliente = 0
+            
+            header_init = empaquetar.build_control_byte(init=True, upload=True)
+            packet_init = empaquetar.create_packet(np_cliente, ack_cliente, header_init, args.name.encode())
+            sock.sendto(packet_init, (args.host, args.port))
+            
+            res_init, addr = sock.recvfrom(empaquetar.MAX_PACKET_SIZE)
+            np_res, ack_res, flags_res, _, _ = empaquetar.unpack_header(res_init)
+            
+            if not (empaquetar.is_init(flags_res) and ack_res == 1):
+                print("[!] Error en el handshake. Abortando.")
+                return
+
+            # --- FASE 2: TRANSFERENCIA ---
+            np_cliente = 1
             while True:
-                chunk = f.read(CHUNK_SIZE)
+                chunk = f.read(empaquetar.MAX_DATA_SIZE)
                 if not chunk:
                     break 
-                sock.sendto(chunk, (args.host, args.port))
-                numero_paquete += 1
-                # print(f"[*] Enviado paquete {numero_paquete}") # Comentado para no saturar
+                
+                packet = empaquetar.create_packet(np_cliente, ack_res, empaquetar.build_control_byte(), chunk)
+                sock.sendto(packet, (args.host, args.port))
+                
+                # ESPERAMOS EL ACK (Aquí es donde el cliente se vuelve 'Stop & Wait')
+                res_data, addr = sock.recvfrom(empaquetar.MAX_PACKET_SIZE)
+                _, ack_servidor, flags_err, _, _ = empaquetar.unpack_header(res_data)
+                
+                # Si el servidor nos pide el siguiente paquete, avanzamos
+                if ack_servidor == np_cliente + 1:
+                    np_cliente += 1
+                else:
+                    # lógica de retransmisión
+                    pass
 
-            # AVISO BURDO DE FIN: Enviamos un paquete vacío para que el server salga del while
-            sock.sendto(b"", (args.host, args.port))
-            print("[+] Transferencia completa. Señal de fin enviada.")
+        # --- FASE 3: CIERRE ---
+        header_close = empaquetar.build_control_byte(close=True)
+        sock.sendto(empaquetar.create_packet(0, 0, header_close, b""), (args.host, args.port))
+        print("[+] Transferencia completa. Señal de fin enviada.")
 
     except OSError as e:
         print(f"Error: {e}")
