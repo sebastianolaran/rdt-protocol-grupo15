@@ -3,33 +3,91 @@ import argparse
 import socket
 import sys
 
+from lib.protocol import CONSTANTS, ERROR_CODES, Packet
+from lib.stop_and_wait import SAWReceiver
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="TP1: Aplicación de transferencia de archivos (Download)"
+        description="TP1: Download de archivo desde el servidor"
     )
-
-    # Mutuamente excluyente verborreico y silencioso
-    grupoExcluyente = parser.add_mutually_exclusive_group()
-    grupoExcluyente.add_argument('-v', '--verbose', action='store_true', help='Aumentar verbosidad')
-    grupoExcluyente.add_argument('-q', '--quiet', action='store_true', help='Disminuir verbosidad')
-
-    # Obligatorios 
-    parser.add_argument('-H', '--host', type=str, default='127.0.0.1', help='Dirección IP del servidor')
-    parser.add_argument('-p', '--port', type=int, required=True, help='Puerto del servidor')
-    parser.add_argument('-d', '--dst', type=str, required=True, help='Ruta donde se descarga el archivo')
-    parser.add_argument('-n', '--name', type=str, required=True, help='Nombre del archivo en el cliente')
-    
-
-    parser.add_argument('-r', '--protocol', default='stop-and-wait', choices=['stop-and-wait', 'selective-repeat'], help='Protocolo de recuperación de errores')
-
+    grupo = parser.add_mutually_exclusive_group()
+    grupo.add_argument('-v', '--verbose', action='store_true',
+                       help='Aumentar verbosidad')
+    grupo.add_argument('-q', '--quiet', action='store_true',
+                       help='Disminuir verbosidad')
+    parser.add_argument('-H', '--host', type=str, default='127.0.0.1',
+                        help='Dirección IP del servidor')
+    parser.add_argument('-p', '--port', type=int, required=True,
+                        help='Puerto del servidor')
+    parser.add_argument('-d', '--dst', type=str, required=True,
+                        help='Ruta donde se descarga el archivo')
+    parser.add_argument('-n', '--name', type=str, required=True,
+                        help='Nombre del archivo en el servidor')
+    parser.add_argument('-r', '--protocol', default='StopAndWait',
+                        choices=['StopAndWait'],
+                        help='Protocolo de recuperación de errores')
     args = parser.parse_args()
 
-    # argparse hace automaticamente el -h y el --help
+    FLAG_I = CONSTANTS["FLAG_I"]
+    STOP_AND_WAIT = CONSTANTS["STOP_AND_WAIT"]
+    MAX_RETRIES = CONSTANTS["MAX_RETRIES"]
+    DEFAULT_TIMEOUT = CONSTANTS["DEFAULT_TIMEOUT"]
+    MAX_PKT_SIZE = CONSTANTS["MAX_PKT_SIZE"]
 
-    # """"""Simulacion de descarga""""""
-    print(f"Iniciando descarga a: {args.dst}")
-    print(f"Destino: {args.host}:{args.port} con el nombre {args.name}")
-    print(f"Usando protocolo: {args.protocol}")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server_addr = (args.host, args.port)
+
+    init_pkt = Packet.build(
+        0, 0, FLAG_I, STOP_AND_WAIT,
+        f"download|{args.name}".encode()
+    )
+
+    connected = False
+    for attempt in range(MAX_RETRIES):
+        try:
+            sock.sendto(init_pkt, server_addr)
+            sock.settimeout(DEFAULT_TIMEOUT)
+            raw, _ = sock.recvfrom(MAX_PKT_SIZE)
+            resp = Packet.parse(raw)
+            if resp.flags & FLAG_I:
+                if resp.win == ERROR_CODES["FILE_NOT_FOUND"]:
+                    print("Error: archivo no encontrado en el servidor.",
+                          file=sys.stderr)
+                    sock.close()
+                    sys.exit(1)
+                elif resp.win == STOP_AND_WAIT:
+                    connected = True
+                    break
+                else:
+                    print(f"Error del servidor: código {resp.win}",
+                          file=sys.stderr)
+                    sock.close()
+                    sys.exit(1)
+        except (TimeoutError, OSError, ValueError):
+            if args.verbose:
+                print(f"Reintento INIT {attempt + 1}/{MAX_RETRIES}...")
+
+    if not connected:
+        print("Error: servidor no responde.", file=sys.stderr)
+        sock.close()
+        sys.exit(1)
+
+    if args.verbose:
+        print(f"Conectado. Descargando '{args.name}' a '{args.dst}'...")
+
+    try:
+        receiver = SAWReceiver(sock, server_addr, verbose=args.verbose)
+        receiver.receive_file(args.dst)
+    except (TimeoutError, OSError) as e:
+        print(f"Error de transferencia: {e}", file=sys.stderr)
+        sock.close()
+        sys.exit(1)
+
+    if not args.quiet:
+        print("Descarga completada.")
+    sock.close()
+
 
 if __name__ == "__main__":
     main()

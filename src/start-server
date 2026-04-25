@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import socket
 import sys
 import threading
 import queue
+
+from lib.protocol import CONSTANTS, ERROR_CODES, Packet
+from lib.stop_and_wait import SAWReceiver, SAWSender
 
 # client_addr -> cola de datagramas entrantes de esa sesión
 sessions = {}
@@ -11,24 +15,66 @@ sessions_lock = threading.Lock()
 
 
 def handle_session(addr, session_queue, server_socket, storage, verbose):
-    """Hilo trabajador: procesa todos los mensajes de un único cliente."""
+    FLAG_I = CONSTANTS["FLAG_I"]
+    STOP_AND_WAIT = CONSTANTS["STOP_AND_WAIT"]
+    DEFAULT_TIMEOUT = CONSTANTS["DEFAULT_TIMEOUT"]
+
+    def send_error(code):
+        err_pkt = Packet.build(0, 0, FLAG_I, code, b"")
+        server_socket.sendto(err_pkt, addr)
+
     if verbose:
         print(f"[+] Nueva sesión: {addr}")
 
     try:
-        while True:
-            data = session_queue.get()
+        raw = session_queue.get(timeout=DEFAULT_TIMEOUT)
+        pkt = Packet.parse(raw)
 
-            if data is None:               ## rompe el bucle
-                break
+        if not (pkt.flags & FLAG_I):
+            send_error(ERROR_CODES["BAD_PACKET"])
+            return
 
-            message = data.decode(errors="replace")
+        try:
+            op, filename = pkt.data.decode().split("|", 1)
+        except (UnicodeDecodeError, ValueError):
+            send_error(ERROR_CODES["BAD_PACKET"])
+            return
 
+        if pkt.win != STOP_AND_WAIT:
+            send_error(ERROR_CODES["PROTO_MISMATCH"])
+            return
+
+        resp = Packet.build(0, 1, FLAG_I, STOP_AND_WAIT, b"")
+        server_socket.sendto(resp, addr)
+
+        if op == "upload":
+            receiver = SAWReceiver(server_socket, addr, verbose,
+                                   recv_queue=session_queue)
+            data = receiver.receive_bytes()
+            dest = os.path.join(storage, filename)
+            with open(dest, "wb") as f:
+                f.write(data)
             if verbose:
-                print(f"[{addr}] recibido ({len(data)} bytes): {message!r}")
+                print(f"[{addr}] upload completado: {dest}")
 
-            # RTA
-            server_socket.sendto(f"ACK: {message}".encode(), addr)
+        elif op == "download":
+            filepath = os.path.join(storage, filename)
+            if not os.path.exists(filepath):
+                send_error(ERROR_CODES["FILE_NOT_FOUND"])
+                return
+            sender = SAWSender(server_socket, addr, verbose,
+                               recv_queue=session_queue)
+            sender.send_file(filepath)
+            sender.close()
+            if verbose:
+                print(f"[{addr}] download completado: {filepath}")
+
+        else:
+            send_error(ERROR_CODES["BAD_PACKET"])
+
+    except Exception as e:
+        if verbose:
+            print(f"[{addr}] error en sesión: {e}")
 
     finally:
         with sessions_lock:
