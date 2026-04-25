@@ -12,7 +12,7 @@ class SAWSender(Sender):
     def __init__(self, sock: socket.socket, addr: tuple,
                  verbose: bool = False, recv_queue: queue.Queue = None):
         super().__init__(sock, addr, verbose)
-        self.recv_queue = recv_queue  
+        self.recv_queue = recv_queue
 
     def _recv_ack(self) -> bytes:
         try:
@@ -41,7 +41,9 @@ class SAWSender(Sender):
                     return
             except (TimeoutError, OSError, ValueError):
                 pass
-        raise TimeoutError(f"sin ACK tras {self.max_retries} intentos")
+        raise TimeoutError(
+            f"TIMEOUT_ABORT: sin ACK tras {self.max_retries} intentos"
+        )
 
     def close(self) -> None:
         fin = Packet.build(self.next_np, 0, CONSTANTS["FLAG_C"], 0, b"")
@@ -94,6 +96,10 @@ class SAWReceiver(Receiver):
             try:
                 pkt = Packet.parse(raw)
             except ValueError:
+                if self.verbose:
+                    np = int.from_bytes(raw[:2], 'big') if len(raw) >= 2 \
+                        else '?'
+                    print(f"[CHECKSUM_ERROR] paquete descartado NP={np}")
                 continue
 
             if pkt.flags & CONSTANTS["FLAG_C"]:
