@@ -4,6 +4,7 @@ import socket
 import sys
 
 from lib.protocol import CONSTANTS, ERROR_CODES, Packet
+from lib.selective_repeat import SRSender
 from lib.stop_and_wait import SAWSender
 
 
@@ -25,7 +26,7 @@ def main():
     parser.add_argument('-n', '--name', type=str, required=True,
                         help='Nombre del archivo en el servidor')
     parser.add_argument('-r', '--protocol', default='StopAndWait',
-                        choices=['StopAndWait'],
+                        choices=['StopAndWait', 'SelectiveRepeat'],
                         help='Protocolo de recuperación de errores')
     args = parser.parse_args()
 
@@ -38,8 +39,12 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_addr = (args.host, args.port)
 
+    win = CONSTANTS.get("SR_WINDOW_SIZE", 4) \
+        if args.protocol == 'SelectiveRepeat' \
+        else STOP_AND_WAIT
+
     init_pkt = Packet.build(
-        0, 0, FLAG_I, STOP_AND_WAIT,
+        0, 0, FLAG_I, win,
         f"upload|{args.name}".encode()
     )
 
@@ -51,11 +56,27 @@ def main():
             raw, _ = sock.recvfrom(MAX_PKT_SIZE)
             resp = Packet.parse(raw)
             if resp.flags & FLAG_I:
-                if resp.win == STOP_AND_WAIT:
+                error = resp.flags & 0x0F
+                if error == ERROR_CODES["OK"]:
                     connected = True
                     break
+                elif error == ERROR_CODES["STORAGE_FULL"]:
+                    print("Error: almacenamiento lleno en el servidor.",
+                          file=sys.stderr)
+                    sock.close()
+                    sys.exit(1)
+                elif error == ERROR_CODES["PROTO_MISMATCH"]:
+                    print("Error: protocolo no soportado por el servidor.",
+                          file=sys.stderr)
+                    sock.close()
+                    sys.exit(1)
+                elif error == ERROR_CODES["PERMISSION_DENIED"]:
+                    print("Error: sin permisos para acceder al archivo.",
+                          file=sys.stderr)
+                    sock.close()
+                    sys.exit(1)
                 else:
-                    print(f"Error del servidor: código {resp.win}",
+                    print(f"Error del servidor: código {error}",
                           file=sys.stderr)
                     sock.close()
                     sys.exit(1)
@@ -72,10 +93,13 @@ def main():
         print(f"Conectado. Subiendo '{args.src}' como '{args.name}'...")
 
     try:
-        sender = SAWSender(sock, server_addr, verbose=args.verbose)
+        if args.protocol == 'SelectiveRepeat':
+            sender = SRSender(sock, server_addr, verbose=args.verbose)
+        else:
+            sender = SAWSender(sock, server_addr, verbose=args.verbose)
         sender.send_file(args.src)
         sender.close()
-    except TimeoutError as e:
+    except (TimeoutError, OSError) as e:
         print(f"Error de transferencia: {e}", file=sys.stderr)
         sock.close()
         sys.exit(1)

@@ -4,15 +4,15 @@ from dataclasses import dataclass
 
 
 CONSTANTS = {
-
-    "HEADER_SIZE": 8,
-    "MAX_PKT_SIZE": 1024,
-    "MAX_PAYLOAD": 1008,
-    "DEFAULT_TIMEOUT": 1.0,
-    "MAX_RETRIES": 10,
-    "STOP_AND_WAIT": 1,
-    "FLAG_I": 0b10000000,
-    "FLAG_C": 0b01000000,
+    "HEADER_SIZE":     8,
+    "MAX_PKT_SIZE":    1024,
+    "MAX_PAYLOAD":     1008,
+    "DEFAULT_TIMEOUT": 0.1,
+    "MAX_RETRIES":     10,
+    "STOP_AND_WAIT":   1,      # W=1 en el INIT
+    "SR_WINDOW_SIZE":  32,     # W por defecto para SR
+    "FLAG_I":          0b10000000,
+    "FLAG_C":          0b01000000,
 }
 
 ERROR_CODES = {
@@ -20,9 +20,9 @@ ERROR_CODES = {
     "BAD_PACKET": 0b0001,
     "FILE_NOT_FOUND": 0b0010,
     "STORAGE_FULL": 0b0011,
-    "PERM_DENIED": 0b0100,
+    "PERMISSION_DENIED": 0b0100,
     "PROTO_MISMATCH": 0b0101,
-    "CHECKSUM": 0b0110,
+    "CHECKSUM_ERROR": 0b0110,
     "TIMEOUT_ABORT": 0b0111,
     "UNKNOWN": 0b1000,
 }

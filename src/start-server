@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import shutil
 import socket
 import sys
 import threading
 import queue
 
 from lib.protocol import CONSTANTS, ERROR_CODES, Packet
+from lib.selective_repeat import SRReceiver, SRSender
 from lib.stop_and_wait import SAWReceiver, SAWSender
 
 # client_addr -> cola de datagramas entrantes de esa sesión
@@ -17,10 +19,11 @@ sessions_lock = threading.Lock()
 def handle_session(addr, session_queue, server_socket, storage, verbose):
     FLAG_I = CONSTANTS["FLAG_I"]
     STOP_AND_WAIT = CONSTANTS["STOP_AND_WAIT"]
+    SELECTIVE_REPEAT = CONSTANTS["SR_WINDOW_SIZE"]
     DEFAULT_TIMEOUT = CONSTANTS["DEFAULT_TIMEOUT"]
 
     def send_error(code):
-        err_pkt = Packet.build(0, 0, FLAG_I, code, b"")
+        err_pkt = Packet.build(0, 0, FLAG_I | code, 0, b"")
         server_socket.sendto(err_pkt, addr)
 
     if verbose:
@@ -31,7 +34,9 @@ def handle_session(addr, session_queue, server_socket, storage, verbose):
         pkt = Packet.parse(raw)
 
         if not (pkt.flags & FLAG_I):
-            send_error(ERROR_CODES["BAD_PACKET"])
+            server_socket.sendto(
+                Packet.build(0, 0, ERROR_CODES["BAD_PACKET"], 0, b""), addr
+            )
             return
 
         try:
@@ -40,37 +45,59 @@ def handle_session(addr, session_queue, server_socket, storage, verbose):
             send_error(ERROR_CODES["BAD_PACKET"])
             return
 
-        if pkt.win != STOP_AND_WAIT:
+        if pkt.win not in (STOP_AND_WAIT, SELECTIVE_REPEAT):
             send_error(ERROR_CODES["PROTO_MISMATCH"])
             return
 
-        resp = Packet.build(0, 1, FLAG_I, STOP_AND_WAIT, b"")
+        if op not in ("upload", "download"):
+            send_error(ERROR_CODES["BAD_PACKET"])
+            return
+
+        if op == "download":
+            filepath = os.path.join(storage, filename)
+            if not os.path.exists(filepath):
+                send_error(ERROR_CODES["FILE_NOT_FOUND"])
+                return
+            if not os.access(filepath, os.R_OK):
+                send_error(ERROR_CODES["PERMISSION_DENIED"])
+                return
+        else:
+            dest = os.path.join(storage, filename)
+            if shutil.disk_usage(storage).free < CONSTANTS["MAX_PKT_SIZE"]:
+                send_error(ERROR_CODES["STORAGE_FULL"])
+                return
+
+        resp = Packet.build(0, 1, FLAG_I | ERROR_CODES["OK"], pkt.win, b"")
         server_socket.sendto(resp, addr)
 
         if op == "upload":
-            receiver = SAWReceiver(server_socket, addr, verbose,
-                                   recv_queue=session_queue)
+            if pkt.win == SELECTIVE_REPEAT:
+                receiver = SRReceiver(
+                    server_socket, addr, verbose, recv_queue=session_queue
+                )
+            else:
+                receiver = SAWReceiver(
+                    server_socket, addr, verbose, recv_queue=session_queue
+                )
             data = receiver.receive_bytes()
-            dest = os.path.join(storage, filename)
             with open(dest, "wb") as f:
                 f.write(data)
             if verbose:
                 print(f"[{addr}] upload completado: {dest}")
 
-        elif op == "download":
-            filepath = os.path.join(storage, filename)
-            if not os.path.exists(filepath):
-                send_error(ERROR_CODES["FILE_NOT_FOUND"])
-                return
-            sender = SAWSender(server_socket, addr, verbose,
-                               recv_queue=session_queue)
+        else:
+            if pkt.win == SELECTIVE_REPEAT:
+                sender = SRSender(
+                    server_socket, addr, verbose, recv_queue=session_queue
+                )
+            else:
+                sender = SAWSender(
+                    server_socket, addr, verbose, recv_queue=session_queue
+                )
             sender.send_file(filepath)
             sender.close()
             if verbose:
                 print(f"[{addr}] download completado: {filepath}")
-
-        else:
-            send_error(ERROR_CODES["BAD_PACKET"])
 
     except Exception as e:
         if verbose:
@@ -112,12 +139,19 @@ def main():
     )
 
     grupoExcluyente = parser.add_mutually_exclusive_group()
-    grupoExcluyente.add_argument('-v', '--verbose', action='store_true', help='Aumentar verbosidad')
-    grupoExcluyente.add_argument('-q', '--quiet', action='store_true', help='Disminuir verbosidad')
+    grupoExcluyente.add_argument(
+        '-v', '--verbose', action='store_true', help='Aumentar verbosidad')
+    grupoExcluyente.add_argument(
+        '-q', '--quiet', action='store_true', help='Disminuir verbosidad')
 
-    parser.add_argument('-H', '--host', type=str, default='127.0.0.1', help='Dirección IP del servidor')
-    parser.add_argument('-p', '--port', type=int, required=True, help='Puerto del servidor')
-    parser.add_argument('-s', '--storage', type=str, required=True, help='Ruta donde iniciar el servidor')
+    parser.add_argument(
+        '-H', '--host', type=str, default='127.0.0.1',
+        help='Dirección IP del servidor')
+    parser.add_argument('-p', '--port', type=int, required=True,
+                        help='Puerto del servidor')
+    parser.add_argument(
+        '-s', '--storage', type=str, required=True,
+        help='Ruta donde iniciar el servidor')
 
     args = parser.parse_args()
 
@@ -126,6 +160,7 @@ def main():
     except KeyboardInterrupt:
         print("\nServidor finalizado por el usuario.")
         sys.exit(0)
+
 
 if __name__ == "__main__":
     main()
