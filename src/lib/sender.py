@@ -11,7 +11,7 @@ class Sender(ABC):
         self.addr    = addr
         self.verbose = verbose
         self.next_np = 1
-        self.last_np = 0
+        self.base = 1
         self.max_retries = CONSTANTS["MAX_RETRIES"]
 
     def _send_raw(self, pkt: bytes) -> None:

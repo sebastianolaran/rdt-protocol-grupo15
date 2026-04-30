@@ -37,7 +37,6 @@ class SAWSender(Sender):
                 ack_pkt = Packet.parse(raw)
                 if ack_pkt.ack == self.next_np + 1:
                     self.next_np += 1
-                    self.last_np = self.next_np - 1
                     return
             except (TimeoutError, OSError, ValueError):
                 pass
@@ -103,17 +102,18 @@ class SAWReceiver(Receiver):
                 continue
 
             if pkt.flags & CONSTANTS["FLAG_C"]:
+                self.last_np = pkt.np
                 self.close()
                 break
 
             if pkt.np == self.expected_np:
                 chunks.append(pkt.data)
-                ack = Packet.build(0, self.expected_np + 1, 0, 0, b"")
+                self.expected_np += 1
+                ack = Packet.build(0, self.expected_np , 0, 0, b"")
                 self._send_raw(ack)
                 self.last_np = pkt.np
-                self.expected_np += 1
             elif pkt.np < self.expected_np:
-                ack = Packet.build(0, pkt.np + 1, 0, 0, b"")
+                ack = Packet.build(0, self.expected_np, 0, 0, b"")
                 self._send_raw(ack)
 
         return b"".join(chunks)
