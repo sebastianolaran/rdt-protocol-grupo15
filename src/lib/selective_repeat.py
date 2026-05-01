@@ -30,45 +30,30 @@ class SRSender(Sender):
             raise TimeoutError("queue timeout")
 
     def send_file(self, filepath: str) -> None:
-        """
-        Lee y envía el archivo en chunks a medida que la ventana tiene espacio.
-        El loop alterna entre tres tareas:
-          1. Llenar la ventana leyendo chunks bajo demanda
-          2. Procesar ACKs entrantes y avanzar la base
-          3. Retransmitir paquetes con timer vencido
-        """
+        # Leer todo el archivo en chunks del tamaño máximo de payload antes de enviar
         with open(filepath, "rb") as f:
-            eof = False
-            while not eof or self.buffer:
-                # 1) Llenar ventana: leer y enviar mientras haya espacio
-                while not eof and self.next_np < self.base + self.window:
-                    chunk = f.read(CONSTANTS["MAX_PAYLOAD"])
-                    if not chunk:
-                        eof = True
-                        break
-                    self.send_bytes(chunk)
+            chunks = list(iter(lambda: f.read(CONSTANTS["MAX_PAYLOAD"]), b""))
 
-                if not self.buffer and eof:
-                    break
+        sent = 0  # índice del próximo chunk a enviar
+        # Continuar hasta enviar todos los chunks Y recibir todos los ACKs
+        while sent < len(chunks) or self.buffer:
+            # Llenar la ventana: enviar chunks mientras haya espacio (next_np < base + window)
+            while sent < len(chunks) and self.next_np < self.base + self.window:
+                self.send_bytes(chunks[sent])
+                sent += 1
 
-                # 2) Intentar recibir un ACK (no bloqueante — timeout corto)
-                try:
-                    raw = self._recv_ack()
-                    ack_pkt = Packet.parse(raw)
-                    # ACK=K significa "recibí todo hasta NP=K-1, esperá NP=K"
-                    # → todo NP en buffer con NP < K fue confirmado
-                    if self.base <= ack_pkt.ack - 1 < self.next_np:
-                        for np in list(self.buffer):
-                            if np < ack_pkt.ack:
-                                self.buffer.pop(np)
-                    # Avanzar base hasta el primer NP aún pendiente
-                    while self.base < self.next_np and self.base not in self.buffer:
-                        self.base += 1
-                except (TimeoutError, OSError, ValueError):
-                    pass
+            try:
+                ack_pkt = Packet.parse(self._recv_ack())
+                # ACK=K significa "esperá NP=K", todo NP < K fue recibido → borrar del buffer
+                for np in [k for k in self.buffer if k < ack_pkt.ack]:
+                    del self.buffer[np]
+                # base = NP más antiguo aún sin ACK (o next_np si no queda nada pendiente)
+                self.base = min(self.buffer, default=self.next_np)
+            except (TimeoutError, OSError, ValueError):
+                pass
 
-                # 3) Retransmitir paquetes con timer vencido
-                self.check_timeouts()
+            # Retransmitir individualmente los paquetes cuyo timer venció
+            self.check_timeouts()
 
     def check_timeouts(self) -> None:
         """
@@ -161,7 +146,7 @@ class SRReceiver(Receiver):
     def receive_bytes(self) -> bytes:
         """
         Loop principal de recepción. Cuatro casos posibles por paquete:
-          - CRC inválido      → descartar silenciosamente, sin ACK
+          - CRC inválido      → descartar silenciosamente, sin ACK 
           - FLAG_C            → iniciar two-way close y terminar
           - NP == expected    → entregar, flush del buffer, ACK adelantado
           - NP > expected     → buffereár si está en ventana, ACK del último en orden
@@ -188,9 +173,20 @@ class SRReceiver(Receiver):
                 continue
 
             if pkt.flags & CONSTANTS["FLAG_C"]:
-                self.last_np = pkt.np
-                self.close()
-                break
+                # FIN recibido: solo cerrar si ya llegaron todos los datos
+                # (expected_np == FIN.np). Si llega antes de que se retransmitan
+                # paquetes perdidos, guardarlo y seguir esperando — de lo contrario
+                # el archivo quedaría truncado.
+                fin_np = pkt.np
+                if self.expected_np == fin_np:
+                    self.last_np = fin_np
+                    self.close()
+                    break
+                # FIN prematuro: ACKear posición actual para que el sender sepa
+                # dónde estamos, y seguir esperando los datos faltantes
+                ack = Packet.build(0, self.expected_np, 0, 0, b"")
+                self._send_raw(ack)
+                continue
 
             if pkt.np == self.expected_np:
                 chunks.append(pkt.data)
@@ -203,6 +199,11 @@ class SRReceiver(Receiver):
                 # ACK adelantado: confirma todo lo entregado hasta acá
                 ack = Packet.build(0, self.expected_np, 0, 0, b"")
                 self._send_raw(ack)
+                # Si ya teníamos el FIN buffereado y ahora completamos los datos, cerrar
+                if fin_np is not None and self.expected_np == fin_np:
+                    self.last_np = fin_np
+                    self.close()
+                    break
 
             elif pkt.np > self.expected_np:
                 # Fuera de orden: buffereár solo si está dentro de la ventana
