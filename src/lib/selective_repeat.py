@@ -21,6 +21,12 @@ class SRSender(Sender):
         # np → (pkt_bytes, send_time, retries): paquetes enviados sin ACK
         self.buffer = {}
         self.base = 1  # paquete más antiguo sin ACKear
+        
+        self.alpha = CONSTANTS["RTO_ALPHA"]
+        self.beta = CONSTANTS["RTO_BETA"]
+        self.srtt = None
+        self.rttvar = None
+        self.rto = CONSTANTS["DEFAULT_TIMEOUT_SR"]
 
     def _recv_ack(self) -> bytes:
         # Unifica la interfaz: queue.Empty → TimeoutError igual que el socket
@@ -49,10 +55,12 @@ class SRSender(Sender):
                     else:
                         # Si es socket directo (cliente), usamos timeout 0
                         self.sock.settimeout(0.0)
-                        raw = self._recv_ack()
+                        # No usar _recv_ack(): evita resetear el timeout a DEFAULT_TIMEOUT
+                        raw, _ = self.sock.recvfrom(CONSTANTS["MAX_PKT_SIZE"])
                     
                     ack_pkt = Packet.parse(raw)
                     for np in [k for k in self.buffer if k < ack_pkt.ack]:
+                        self._update_rto_on_ack(np)
                         del self.buffer[np]
                     self.base = min(self.buffer, default=self.next_np)
                 except (queue.Empty, TimeoutError, OSError, ValueError):
@@ -60,7 +68,7 @@ class SRSender(Sender):
 
             # ¡CRUCIAL! Devolver el timeout a la normalidad si lo cambiamos
             if not self.recv_queue:
-                self.sock.settimeout(CONSTANTS["DEFAULT_TIMEOUT"])
+                self.sock.settimeout(self.rto)
 
             # Revisar si algo venció y retransmitir
             self.check_timeouts()
@@ -74,7 +82,7 @@ class SRSender(Sender):
         """
         for np in list(self.buffer):
             pkt_bytes, send_time, retries = self.buffer[np]
-            if time.time() - send_time > CONSTANTS["DEFAULT_TIMEOUT"]:
+            if time.time() - send_time > self.rto:
                 if retries < CONSTANTS["MAX_RETRIES"]:
                     if self.verbose:
                         print(f"[SR] Retransmitiendo NP={np} "
@@ -97,6 +105,27 @@ class SRSender(Sender):
         self.buffer[self.next_np] = (pkt, time.time(), 0)
         self._send_raw(pkt)
         self.next_np += 1
+
+    def _update_rto_on_ack(self, np: int) -> None:
+        pkt_bytes, send_time, retries = self.buffer[np]
+        if retries > 0:
+            return
+        rtt_sample = time.time() - send_time
+        if self.srtt is None:
+            self.srtt = rtt_sample
+            self.rttvar = rtt_sample / 2
+        else:
+            self.rttvar = (1 - self.beta) * self.rttvar + \
+                self.beta * abs(rtt_sample - self.srtt)
+            self.srtt = (1 - self.alpha) * self.srtt + \
+                self.alpha * rtt_sample
+        
+        self.rto = min(
+            CONSTANTS["RTO_MAX"],
+            max(self.srtt + 4 * self.rttvar, CONSTANTS["RTO_MIN"])
+        )
+
+        print(f"[RTO UPDATE] rto to use: {self.rto:.3f}s (srtt={self.srtt:.3f}s, rttvar={self.rttvar:.3f}s)")
 
     def close(self) -> None:
         """

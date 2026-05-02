@@ -13,10 +13,20 @@ class SAWSender(Sender):
                  verbose: bool = False, recv_queue: queue.Queue = None):
         super().__init__(sock, addr, verbose)
         self.recv_queue = recv_queue
+        
+        self.alpha = CONSTANTS["RTO_ALPHA"]
+        self.beta = CONSTANTS["RTO_BETA"]
+        self.srtt = None
+        self.rttvar = None
+        self.rto = CONSTANTS["DEFAULT_TIMEOUT_SAW"]
 
     def _recv_ack(self) -> bytes:
         try:
-            return super()._recv_ack()
+            if self.recv_queue:
+                return self.recv_queue.get(timeout=self.rto)
+            self.sock.settimeout(self.rto)
+            raw, _ = self.sock.recvfrom(CONSTANTS["MAX_PKT_SIZE"])
+            return raw
         except queue.Empty:
             raise TimeoutError("queue timeout")
 
@@ -30,18 +40,43 @@ class SAWSender(Sender):
 
     def send_bytes(self, data: bytes) -> None:
         pkt = Packet.build(self.next_np, 0, 0, 0, data)
+        send_time = None
+        retransmitted = False
         for _ in range(self.max_retries):
             try:
+                if send_time is None:
+                    send_time = time.time()
                 self._send_raw(pkt)
                 raw = self._recv_ack()
                 ack_pkt = Packet.parse(raw)
                 if ack_pkt.ack == self.next_np + 1:
+                    if not retransmitted:
+                        self._update_rto_on_ack(send_time)
                     self.next_np += 1
                     return
-            except (TimeoutError, OSError, ValueError):
+            except TimeoutError:
+                retransmitted = True
+            except (OSError, ValueError):
                 pass
         raise TimeoutError(
             f"TIMEOUT_ABORT: sin ACK tras {self.max_retries} intentos"
+        )
+
+    def _update_rto_on_ack(self, send_time: float) -> None:
+        if send_time is None:
+            return
+        rtt_sample = time.time() - send_time
+        if self.srtt is None:
+            self.srtt = rtt_sample
+            self.rttvar = rtt_sample / 2
+        else:
+            self.rttvar = (1 - self.beta) * self.rttvar + \
+                self.beta * abs(rtt_sample - self.srtt)
+            self.srtt = (1 - self.alpha) * self.srtt + \
+                self.alpha * rtt_sample
+        self.rto = min(
+            CONSTANTS["RTO_MAX"],
+            max(self.srtt + 4 * self.rttvar, CONSTANTS["RTO_MIN"])
         )
 
     def close(self) -> None:
@@ -49,7 +84,13 @@ class SAWSender(Sender):
         for _ in range(self.max_retries):
             try:
                 self._send_raw(fin)
-                raw = self._recv_ack()
+                if self.recv_queue:
+                    raw = self.recv_queue.get(
+                        timeout=CONSTANTS["DEFAULT_TIMEOUT"]
+                    )
+                else:
+                    self.sock.settimeout(CONSTANTS["DEFAULT_TIMEOUT"])
+                    raw, _ = self.sock.recvfrom(CONSTANTS["MAX_PKT_SIZE"])
                 resp = Packet.parse(raw)
                 if resp.flags & CONSTANTS["FLAG_C"]:
                     ack_final = Packet.build(
