@@ -51,17 +51,17 @@ class SRSender(Sender):
                 try:
                     if self.recv_queue:
                         # Si hay cola (servidor), vaciamos sin tocar el socket
-                        raw = self.recv_queue.get(timeout=0)
+                        raw = self.recv_queue.get(timeout=self.rto)
                     else:
                         # Si es socket directo (cliente), usamos timeout 0
-                        self.sock.settimeout(0.0)
+                        self.sock.settimeout(self.rto)
                         # No usar _recv_ack(): evita resetear el timeout a DEFAULT_TIMEOUT
                         raw, _ = self.sock.recvfrom(CONSTANTS["MAX_PKT_SIZE"])
                     
                     ack_pkt = Packet.parse(raw)
-                    for np in [k for k in self.buffer if k < ack_pkt.ack]:
-                        self._update_rto_on_ack(np)
-                        del self.buffer[np]
+                    if ack_pkt.ack in self.buffer:
+                        self._update_rto_on_ack(ack_pkt.ack)
+                        del self.buffer[ack_pkt.ack]
                     self.base = min(self.buffer, default=self.next_np)
                 except (queue.Empty, TimeoutError, OSError, ValueError):
                     break
@@ -72,7 +72,7 @@ class SRSender(Sender):
 
             # Revisar si algo venció y retransmitir
             self.check_timeouts()
-            time.sleep(0.001) # Respiro para el CPU, hay que probar sin esto a ver que cambia
+            time.sleep(0.0005) # Respiro para el CPU, hay que probar sin esto a ver que cambia
 
     def check_timeouts(self) -> None:
         """
@@ -86,7 +86,7 @@ class SRSender(Sender):
                 if retries < CONSTANTS["MAX_RETRIES"]:
                     if self.verbose:
                         print(f"[SR] Retransmitiendo NP={np} "
-                              f"(intento {retries + 1})")
+                              f"(reintento {retries + 1})")
                     self.buffer[np] = (pkt_bytes, time.time(), retries + 1)
                     self._send_raw(pkt_bytes)
                 else:
@@ -125,7 +125,7 @@ class SRSender(Sender):
             max(self.srtt + 4 * self.rttvar, CONSTANTS["RTO_MIN"])
         )
 
-        print(f"[RTO UPDATE] rto to use: {self.rto:.3f}s (srtt={self.srtt:.3f}s, rttvar={self.rttvar:.3f}s)")
+        print(f"[RTO UPDATE] rto to use: {self.rto:.8f}s (srtt={self.srtt:.8f}s, rttvar={self.rttvar:.8f}s)")
 
     def close(self) -> None:
         """
@@ -223,9 +223,8 @@ class SRReceiver(Receiver):
                     self.last_np = fin_np
                     self.close()
                     break
-                # FIN prematuro: ACKear posición actual para que el sender sepa
-                # dónde estamos, y seguir esperando los datos faltantes
-                ack = Packet.build(0, self.expected_np, 0, 0, b"")
+                # FIN prematuro: ACKear individualmente
+                ack = Packet.build(0, pkt.np, 0, 0, b"")
                 self._send_raw(ack)
                 continue
 
@@ -237,8 +236,8 @@ class SRReceiver(Receiver):
                 while self.expected_np in self.buffer:
                     chunks.append(self.buffer.pop(self.expected_np))
                     self.expected_np += 1
-                # ACK adelantado: confirma todo lo entregado hasta acá
-                ack = Packet.build(0, self.expected_np, 0, 0, b"")
+                # ACK individual
+                ack = Packet.build(0, pkt.np, 0, 0, b"")
                 self._send_raw(ack)
                 # Si ya teníamos el FIN buffereado y ahora completamos los datos, cerrar
                 if fin_np is not None and self.expected_np == fin_np:
@@ -251,13 +250,13 @@ class SRReceiver(Receiver):
                 # Si está fuera de ventana se ignora pero igual se ACKea
                 if pkt.np < self.expected_np + self.window:
                     self.buffer[pkt.np] = pkt.data
-                # ACK del último en orden para que el sender sepa dónde está la base
-                ack = Packet.build(0, self.expected_np, 0, 0, b"")
+                # ACK individual
+                ack = Packet.build(0, pkt.np, 0, 0, b"")
                 self._send_raw(ack)
 
             else:
-                # Duplicado: ya fue entregado, reenviar mismo ACK
-                ack = Packet.build(0, self.expected_np, 0, 0, b"")
+                # Duplicado: ya fue entregado, reenviar ACK individual
+                ack = Packet.build(0, pkt.np, 0, 0, b"")
                 self._send_raw(ack)
 
         return b"".join(chunks)
