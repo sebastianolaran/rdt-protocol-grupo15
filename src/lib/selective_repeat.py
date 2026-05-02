@@ -30,30 +30,41 @@ class SRSender(Sender):
             raise TimeoutError("queue timeout")
 
     def send_file(self, filepath: str) -> None:
-        # Leer todo el archivo en chunks del tamaño máximo de payload antes de enviar
         with open(filepath, "rb") as f:
             chunks = list(iter(lambda: f.read(CONSTANTS["MAX_PAYLOAD"]), b""))
 
-        sent = 0  # índice del próximo chunk a enviar
-        # Continuar hasta enviar todos los chunks Y recibir todos los ACKs
+        sent = 0
         while sent < len(chunks) or self.buffer:
-            # Llenar la ventana: enviar chunks mientras haya espacio (next_np < base + window)
+            # Llenar la ventana
             while sent < len(chunks) and self.next_np < self.base + self.window:
                 self.send_bytes(chunks[sent])
                 sent += 1
 
-            try:
-                ack_pkt = Packet.parse(self._recv_ack())
-                # ACK=K significa "esperá NP=K", todo NP < K fue recibido → borrar del buffer
-                for np in [k for k in self.buffer if k < ack_pkt.ack]:
-                    del self.buffer[np]
-                # base = NP más antiguo aún sin ACK (o next_np si no queda nada pendiente)
-                self.base = min(self.buffer, default=self.next_np)
-            except (TimeoutError, OSError, ValueError):
-                pass
+            # Procesar TODOS los ACKs acumulados (Versión segura para el Servidor)
+            while True:
+                try:
+                    if self.recv_queue:
+                        # Si hay cola (servidor), vaciamos sin tocar el socket
+                        raw = self.recv_queue.get(timeout=0)
+                    else:
+                        # Si es socket directo (cliente), usamos timeout 0
+                        self.sock.settimeout(0.0)
+                        raw = self._recv_ack()
+                    
+                    ack_pkt = Packet.parse(raw)
+                    for np in [k for k in self.buffer if k < ack_pkt.ack]:
+                        del self.buffer[np]
+                    self.base = min(self.buffer, default=self.next_np)
+                except (queue.Empty, TimeoutError, OSError, ValueError):
+                    break
 
-            # Retransmitir individualmente los paquetes cuyo timer venció
+            # ¡CRUCIAL! Devolver el timeout a la normalidad si lo cambiamos
+            if not self.recv_queue:
+                self.sock.settimeout(CONSTANTS["DEFAULT_TIMEOUT"])
+
+            # Revisar si algo venció y retransmitir
             self.check_timeouts()
+            time.sleep(0.001) # Respiro para el CPU, hay que probar sin esto a ver que cambia
 
     def check_timeouts(self) -> None:
         """
@@ -153,6 +164,7 @@ class SRReceiver(Receiver):
           - NP < expected     → duplicado, reenviar mismo ACK
         """
         chunks = []
+        fin_np = None
 
         while True:
             try:

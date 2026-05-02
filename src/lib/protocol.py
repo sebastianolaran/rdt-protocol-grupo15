@@ -7,10 +7,12 @@ CONSTANTS = {
     "HEADER_SIZE":     8,
     "MAX_PKT_SIZE":    1024,
     "MAX_PAYLOAD":     1008,
-    "DEFAULT_TIMEOUT": 0.1,
-    "MAX_RETRIES":     10,
+    "DEFAULT_TIMEOUT": 0.5,
+    "DEFAULT_TIMEOUT_SR": 0.5,
+    "DEFAULT_TIMEOUT_SAW": 0.2,
+    "MAX_RETRIES":     20,
     "STOP_AND_WAIT":   1,      # W=1 en el INIT
-    "SR_WINDOW_SIZE":  32,     # W por defecto para SR
+    "SR_WINDOW_SIZE":  64,     # W por defecto para SR
     "FLAG_I":          0b10000000,
     "FLAG_C":          0b01000000,
 }

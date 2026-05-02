@@ -56,7 +56,7 @@ class SAWSender(Sender):
                         self.next_np + 1, resp.np + 1, 0, 0, b""
                     )
                     self._send_raw(ack_final)
-                    time.sleep(2 * CONSTANTS["DEFAULT_TIMEOUT"])
+                    time.sleep(2 * CONSTANTS["DEFAULT_TIMEOUT_SAW"])
                     return
             except (TimeoutError, OSError, ValueError):
                 pass
@@ -73,10 +73,10 @@ class SAWReceiver(Receiver):
     def _recv_packet(self) -> bytes:
         if self.recv_queue:
             try:
-                return self.recv_queue.get(timeout=CONSTANTS["DEFAULT_TIMEOUT"])
+                return self.recv_queue.get(timeout=CONSTANTS["DEFAULT_TIMEOUT_SAW"])
             except queue.Empty:
                 raise TimeoutError("queue timeout")
-        self.sock.settimeout(CONSTANTS["DEFAULT_TIMEOUT"])
+        self.sock.settimeout(CONSTANTS["DEFAULT_TIMEOUT_SAW"])
         raw, _ = self.sock.recvfrom(CONSTANTS["MAX_PKT_SIZE"])
         return raw
 
