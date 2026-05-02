@@ -14,7 +14,7 @@ CONSTANTS = {
     "RTO_ALPHA":       0.125,
     "RTO_BETA":        0.25,
     "RTO_MIN":         0.01,
-    "RTO_MAX":         0.3,
+    "RTO_MAX":         0.15,
     "STOP_AND_WAIT":   1,      # W=1 en el INIT
     "SR_WINDOW_SIZE":  64,     # W por defecto para SR
     "FLAG_I":          0b10000000,
