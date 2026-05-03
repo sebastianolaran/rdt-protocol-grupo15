@@ -11,8 +11,12 @@ CONSTANTS = {
     "DEFAULT_TIMEOUT_SR": 0.5,
     "DEFAULT_TIMEOUT_SAW": 0.2,
     "MAX_RETRIES":     20,
+    "RTO_ALPHA":       0.125,
+    "RTO_BETA":        0.25,
+    "RTO_MIN":         0.0000001,
+    "RTO_MAX":         1.0,
     "STOP_AND_WAIT":   1,      # W=1 en el INIT
-    "SR_WINDOW_SIZE":  64,     # W por defecto para SR
+    "SR_WINDOW_SIZE":  32,     # W por defecto para SR
     "FLAG_I":          0b10000000,
     "FLAG_C":          0b01000000,
 }
