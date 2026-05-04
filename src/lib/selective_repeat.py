@@ -64,6 +64,8 @@ class SRSender(Sender):
                         self._send_raw(resp)
                         continue
                     if ack_pkt.ack in self.buffer:
+                        if self.verbose:
+                            print(f"[SR] ACK recibido NP={ack_pkt.ack} | pendientes={len(self.buffer) - 1}")
                         self._update_rto_on_ack(ack_pkt.ack)
                         del self.buffer[ack_pkt.ack]
                     self.base = min(self.buffer, default=self.next_np)
@@ -107,6 +109,8 @@ class SRSender(Sender):
         """
         pkt = Packet.build(self.next_np, 0, 0, 0, data)
         self.buffer[self.next_np] = (pkt, time.time(), 0)
+        if self.verbose:
+            print(f"[SR] Enviando NP={self.next_np} ({len(data)} bytes) | en vuelo={len(self.buffer)}")
         self._send_raw(pkt)
         self.next_np += 1
 
@@ -129,7 +133,8 @@ class SRSender(Sender):
             max(self.srtt + 4 * self.rttvar, CONSTANTS["RTO_MIN"])
         )
 
-        print(f"[RTO UPDATE] rto to use: {self.rto:.8f}s (srtt={self.srtt:.8f}s, rttvar={self.rttvar:.8f}s)")
+        if self.verbose:
+            print(f"[SR] RTO actualizado: {self.rto:.8f}s (srtt={self.srtt:.8f}s, rttvar={self.rttvar:.8f}s)")
 
     def close(self) -> None:
         """
@@ -140,6 +145,8 @@ class SRSender(Sender):
         TIME_WAIT evita que un FIN-ACK retrasado llegue a una sesión nueva.
         """
         fin = Packet.build(self.next_np, 0, CONSTANTS["FLAG_C"], 0, b"")
+        if self.verbose:
+            print(f"[SR] Enviando FIN NP={self.next_np}")
         for _ in range(self.max_retries):
             self._send_raw(fin)
             try:
@@ -148,16 +155,21 @@ class SRSender(Sender):
                         raw = self._recv_ack()
                         resp = Packet.parse(raw)
                         if resp.flags & CONSTANTS["FLAG_C"]:
+                            if self.verbose:
+                                print(f"[SR] FIN-ACK recibido, enviando ACK final")
                             ack_final = Packet.build(
                                 self.next_np, resp.np + 1, 0, 0, b""
                             )
                             self._send_raw(ack_final)
+                            if self.verbose:
+                                print(f"[SR] CLOSE completado (TIME_WAIT)")
                             time.sleep(2 * CONSTANTS["DEFAULT_TIMEOUT"])
                             return
                     except ValueError:
                         pass # Ignorar paquetes corruptos sin reenviar FIN
             except (TimeoutError, OSError):
-                pass
+                if self.verbose:
+                    print(f"[SR] Timeout esperando FIN-ACK, retransmitiendo FIN")
         raise TimeoutError("CLOSE sin respuesta")
 
 
@@ -234,15 +246,21 @@ class SRReceiver(Receiver):
                 # el archivo quedaría truncado.
                 fin_np = pkt.np
                 if self.expected_np == fin_np:
+                    if self.verbose:
+                        print(f"[SR] FIN recibido NP={pkt.np}, cerrando")
                     self.last_np = fin_np
                     self.close()
                     break
                 # FIN prematuro: ACKear individualmente
+                if self.verbose:
+                    print(f"[SR] FIN prematuro NP={pkt.np} (esperado {self.expected_np}), esperando datos faltantes")
                 ack = Packet.build(0, pkt.np, 0, 0, b"")
                 self._send_raw(ack)
                 continue
 
             if pkt.np == self.expected_np:
+                if self.verbose:
+                    print(f"[SR] Recibido en orden NP={pkt.np}, ACK enviado")
                 chunks.append(pkt.data)
                 self.expected_np += 1
                 self.last_np = pkt.np
@@ -263,13 +281,19 @@ class SRReceiver(Receiver):
                 # Fuera de orden: buffereár solo si está dentro de la ventana
                 # Si está fuera de ventana se ignora pero igual se ACKea
                 if pkt.np < self.expected_np + self.window:
+                    if self.verbose:
+                        print(f"[SR] Fuera de orden NP={pkt.np} (esperado {self.expected_np}), buffereado")
                     self.buffer[pkt.np] = pkt.data
+                elif self.verbose:
+                    print(f"[SR] Fuera de ventana NP={pkt.np} (esperado {self.expected_np}), ignorado")
                 # ACK individual
                 ack = Packet.build(0, pkt.np, 0, 0, b"")
                 self._send_raw(ack)
 
             else:
                 # Duplicado: ya fue entregado, reenviar ACK individual
+                if self.verbose:
+                    print(f"[SR] Duplicado NP={pkt.np} (esperado {self.expected_np}), reenviando ACK")
                 ack = Packet.build(0, pkt.np, 0, 0, b"")
                 self._send_raw(ack)
 
@@ -286,6 +310,8 @@ class SRReceiver(Receiver):
         fin_ack = Packet.build(
             0, self.last_np + 1, CONSTANTS["FLAG_C"], 0, b""
         )
+        if self.verbose:
+            print(f"[SR] Enviando FIN-ACK")
         self._send_raw(fin_ack)
         start_time = time.time()
         timeout_wait = 2 * CONSTANTS.get("RTO_MAX", 1.0)
@@ -298,6 +324,8 @@ class SRReceiver(Receiver):
                     self._send_raw(fin_ack)
                     start_time = time.time() # Resetear timer si nos siguen hablando
                 else:
+                    if self.verbose:
+                        print(f"[SR] ACK final recibido, CLOSE completado")
                     return # ACK final recibido
             except (TimeoutError, OSError, ValueError):
                 pass # Ignoramos errores y el loop evaluará si ya pasamos el tiempo límite

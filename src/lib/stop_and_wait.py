@@ -42,10 +42,15 @@ class SAWSender(Sender):
         pkt = Packet.build(self.next_np, 0, 0, 0, data)
         send_time = None
         retransmitted = False
-        for _ in range(self.max_retries):
+        for attempt in range(self.max_retries):
             try:
                 if send_time is None:
                     send_time = time.time()
+                if self.verbose:
+                    if attempt == 0:
+                        print(f"[SAW] Enviando NP={self.next_np} ({len(data)} bytes)")
+                    else:
+                        print(f"[SAW] Retransmitiendo NP={self.next_np} (intento {attempt + 1})")
                 self._send_raw(pkt)
                 raw = self._recv_ack()
                 ack_pkt = Packet.parse(raw)
@@ -54,11 +59,15 @@ class SAWSender(Sender):
                     self._send_raw(resp)
                     continue
                 if ack_pkt.ack == self.next_np + 1:
+                    if self.verbose:
+                        print(f"[SAW] ACK recibido para NP={self.next_np}")
                     if not retransmitted:
                         self._update_rto_on_ack(send_time)
                     self.next_np += 1
                     return
             except TimeoutError:
+                if self.verbose:
+                    print(f"[SAW] Timeout esperando ACK de NP={self.next_np}")
                 retransmitted = True
             except (OSError, ValueError):
                 pass
@@ -85,6 +94,8 @@ class SAWSender(Sender):
 
     def close(self) -> None:
         fin = Packet.build(self.next_np, 0, CONSTANTS["FLAG_C"], 0, b"")
+        if self.verbose:
+            print(f"[SAW] Enviando FIN NP={self.next_np}")
         for _ in range(self.max_retries):
             self._send_raw(fin)
             try:
@@ -99,16 +110,21 @@ class SAWSender(Sender):
                             raw, _ = self.sock.recvfrom(CONSTANTS["MAX_PKT_SIZE"])
                         resp = Packet.parse(raw)
                         if resp.flags & CONSTANTS["FLAG_C"]:
+                            if self.verbose:
+                                print(f"[SAW] FIN-ACK recibido, enviando ACK final")
                             ack_final = Packet.build(
                                 self.next_np + 1, resp.np + 1, 0, 0, b""
                             )
                             self._send_raw(ack_final)
+                            if self.verbose:
+                                print(f"[SAW] CLOSE completado (TIME_WAIT)")
                             time.sleep(2 * CONSTANTS["DEFAULT_TIMEOUT_SAW"])
                             return
                     except ValueError:
                         pass
             except (TimeoutError, OSError):
-                pass
+                if self.verbose:
+                    print(f"[SAW] Timeout esperando FIN-ACK, retransmitiendo FIN")
         raise TimeoutError("CLOSE sin respuesta")
 
 
@@ -156,17 +172,23 @@ class SAWReceiver(Receiver):
                 continue
 
             if pkt.flags & CONSTANTS["FLAG_C"]:
+                if self.verbose:
+                    print(f"[SAW] FIN recibido NP={pkt.np}, cerrando")
                 self.last_np = pkt.np
                 self.close()
                 break
 
             if pkt.np == self.expected_np:
+                if self.verbose:
+                    print(f"[SAW] Recibido en orden NP={pkt.np}, enviando ACK={self.expected_np + 1}")
                 chunks.append(pkt.data)
                 self.expected_np += 1
                 ack = Packet.build(0, self.expected_np , 0, 0, b"")
                 self._send_raw(ack)
                 self.last_np = pkt.np
             elif pkt.np < self.expected_np:
+                if self.verbose:
+                    print(f"[SAW] Duplicado NP={pkt.np} (esperado {self.expected_np}), reenviando ACK")
                 ack = Packet.build(0, self.expected_np, 0, 0, b"")
                 self._send_raw(ack)
 
@@ -176,6 +198,8 @@ class SAWReceiver(Receiver):
         fin_ack = Packet.build(
             0, self.last_np + 1, CONSTANTS["FLAG_C"], 0, b""
         )
+        if self.verbose:
+            print(f"[SAW] Enviando FIN-ACK")
         self._send_raw(fin_ack)
         start_time = time.time()
         timeout_wait = 2 * CONSTANTS.get("RTO_MAX", 1.0)
@@ -187,6 +211,8 @@ class SAWReceiver(Receiver):
                     self._send_raw(fin_ack)
                     start_time = time.time()
                 else:
+                    if self.verbose:
+                        print(f"[SAW] ACK final recibido, CLOSE completado")
                     return
             except (TimeoutError, OSError, ValueError):
                 pass
