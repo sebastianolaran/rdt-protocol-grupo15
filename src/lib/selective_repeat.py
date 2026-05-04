@@ -78,8 +78,7 @@ class SRSender(Sender):
 
             # Revisar si algo venció y retransmitir
             self.check_timeouts()
-            time.sleep(0.0005) # Respiro para el CPU, hay que probar sin esto a ver que cambia
-
+            
     def check_timeouts(self) -> None:
         """
         Recorre el buffer y retransmite individualmente cada paquete
