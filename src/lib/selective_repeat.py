@@ -59,6 +59,10 @@ class SRSender(Sender):
                         raw, _ = self.sock.recvfrom(CONSTANTS["MAX_PKT_SIZE"])
                     
                     ack_pkt = Packet.parse(raw)
+                    if ack_pkt.flags & CONSTANTS["FLAG_I"]:
+                        resp = Packet.build(0, 1, CONSTANTS["FLAG_I"] | 0b0000, ack_pkt.win, b"")
+                        self._send_raw(resp)
+                        continue
                     if ack_pkt.ack in self.buffer:
                         self._update_rto_on_ack(ack_pkt.ack)
                         del self.buffer[ack_pkt.ack]
@@ -137,18 +141,22 @@ class SRSender(Sender):
         """
         fin = Packet.build(self.next_np, 0, CONSTANTS["FLAG_C"], 0, b"")
         for _ in range(self.max_retries):
+            self._send_raw(fin)
             try:
-                self._send_raw(fin)
-                raw = self._recv_ack()
-                resp = Packet.parse(raw)
-                if resp.flags & CONSTANTS["FLAG_C"]:
-                    ack_final = Packet.build(
-                        self.next_np, resp.np + 1, 0, 0, b""
-                    )
-                    self._send_raw(ack_final)
-                    time.sleep(2 * CONSTANTS["DEFAULT_TIMEOUT"])
-                    return
-            except (TimeoutError, OSError, ValueError):
+                while True:
+                    try:
+                        raw = self._recv_ack()
+                        resp = Packet.parse(raw)
+                        if resp.flags & CONSTANTS["FLAG_C"]:
+                            ack_final = Packet.build(
+                                self.next_np, resp.np + 1, 0, 0, b""
+                            )
+                            self._send_raw(ack_final)
+                            time.sleep(2 * CONSTANTS["DEFAULT_TIMEOUT"])
+                            return
+                    except ValueError:
+                        pass # Ignorar paquetes corruptos sin reenviar FIN
+            except (TimeoutError, OSError):
                 pass
         raise TimeoutError("CLOSE sin respuesta")
 
@@ -213,6 +221,12 @@ class SRReceiver(Receiver):
                     print(f"[CHECKSUM_ERROR] paquete descartado NP={np}")
                 continue
 
+            if pkt.flags & CONSTANTS["FLAG_I"]:
+                # Duplicado del INIT (probablemente se perdió nuestro ACK)
+                resp = Packet.build(0, 1, CONSTANTS["FLAG_I"] | 0b0000, pkt.win, b"")
+                self._send_raw(resp)
+                continue
+
             if pkt.flags & CONSTANTS["FLAG_C"]:
                 # FIN recibido: solo cerrar si ya llegaron todos los datos
                 # (expected_np == FIN.np). Si llega antes de que se retransmitan
@@ -273,7 +287,17 @@ class SRReceiver(Receiver):
             0, self.last_np + 1, CONSTANTS["FLAG_C"], 0, b""
         )
         self._send_raw(fin_ack)
-        try:
-            self._recv_packet()
-        except (TimeoutError, OSError, ValueError):
-            pass
+        start_time = time.time()
+        timeout_wait = 2 * CONSTANTS.get("RTO_MAX", 1.0)
+        while time.time() - start_time < timeout_wait:
+            try:
+                raw = self._recv_packet()
+                resp = Packet.parse(raw)
+                # Si recibimos el FIN nuevamente, reenviamos FIN-ACK
+                if resp.flags & CONSTANTS["FLAG_C"]:
+                    self._send_raw(fin_ack)
+                    start_time = time.time() # Resetear timer si nos siguen hablando
+                else:
+                    return # ACK final recibido
+            except (TimeoutError, OSError, ValueError):
+                pass # Ignoramos errores y el loop evaluará si ya pasamos el tiempo límite

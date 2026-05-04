@@ -49,6 +49,10 @@ class SAWSender(Sender):
                 self._send_raw(pkt)
                 raw = self._recv_ack()
                 ack_pkt = Packet.parse(raw)
+                if ack_pkt.flags & CONSTANTS["FLAG_I"]:
+                    resp = Packet.build(0, 1, CONSTANTS["FLAG_I"] | 0b0000, ack_pkt.win, b"")
+                    self._send_raw(resp)
+                    continue
                 if ack_pkt.ack == self.next_np + 1:
                     if not retransmitted:
                         self._update_rto_on_ack(send_time)
@@ -82,24 +86,28 @@ class SAWSender(Sender):
     def close(self) -> None:
         fin = Packet.build(self.next_np, 0, CONSTANTS["FLAG_C"], 0, b"")
         for _ in range(self.max_retries):
+            self._send_raw(fin)
             try:
-                self._send_raw(fin)
-                if self.recv_queue:
-                    raw = self.recv_queue.get(
-                        timeout=CONSTANTS["DEFAULT_TIMEOUT"]
-                    )
-                else:
-                    self.sock.settimeout(CONSTANTS["DEFAULT_TIMEOUT"])
-                    raw, _ = self.sock.recvfrom(CONSTANTS["MAX_PKT_SIZE"])
-                resp = Packet.parse(raw)
-                if resp.flags & CONSTANTS["FLAG_C"]:
-                    ack_final = Packet.build(
-                        self.next_np + 1, resp.np + 1, 0, 0, b""
-                    )
-                    self._send_raw(ack_final)
-                    time.sleep(2 * CONSTANTS["DEFAULT_TIMEOUT_SAW"])
-                    return
-            except (TimeoutError, OSError, ValueError):
+                while True:
+                    try:
+                        if self.recv_queue:
+                            raw = self.recv_queue.get(
+                                timeout=CONSTANTS["DEFAULT_TIMEOUT"]
+                            )
+                        else:
+                            self.sock.settimeout(CONSTANTS["DEFAULT_TIMEOUT"])
+                            raw, _ = self.sock.recvfrom(CONSTANTS["MAX_PKT_SIZE"])
+                        resp = Packet.parse(raw)
+                        if resp.flags & CONSTANTS["FLAG_C"]:
+                            ack_final = Packet.build(
+                                self.next_np + 1, resp.np + 1, 0, 0, b""
+                            )
+                            self._send_raw(ack_final)
+                            time.sleep(2 * CONSTANTS["DEFAULT_TIMEOUT_SAW"])
+                            return
+                    except ValueError:
+                        pass
+            except (TimeoutError, OSError):
                 pass
         raise TimeoutError("CLOSE sin respuesta")
 
@@ -142,6 +150,11 @@ class SAWReceiver(Receiver):
                     print(f"[CHECKSUM_ERROR] paquete descartado NP={np}")
                 continue
 
+            if pkt.flags & CONSTANTS["FLAG_I"]:
+                resp = Packet.build(0, 1, CONSTANTS["FLAG_I"] | 0b0000, pkt.win, b"")
+                self._send_raw(resp)
+                continue
+
             if pkt.flags & CONSTANTS["FLAG_C"]:
                 self.last_np = pkt.np
                 self.close()
@@ -164,7 +177,16 @@ class SAWReceiver(Receiver):
             0, self.last_np + 1, CONSTANTS["FLAG_C"], 0, b""
         )
         self._send_raw(fin_ack)
-        try:
-            self._recv_packet()
-        except (TimeoutError, OSError, ValueError):
-            pass
+        start_time = time.time()
+        timeout_wait = 2 * CONSTANTS.get("RTO_MAX", 1.0)
+        while time.time() - start_time < timeout_wait:
+            try:
+                raw = self._recv_packet()
+                resp = Packet.parse(raw)
+                if resp.flags & CONSTANTS["FLAG_C"]:
+                    self._send_raw(fin_ack)
+                    start_time = time.time()
+                else:
+                    return
+            except (TimeoutError, OSError, ValueError):
+                pass
