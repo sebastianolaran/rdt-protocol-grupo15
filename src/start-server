@@ -120,6 +120,14 @@ def start_server(host, port, storage, verbose):
 
         with sessions_lock:
             if addr not in sessions:
+                # Verificar que el paquete sea un INIT válido antes de crear la sesión
+                try:
+                    pkt = Packet.parse(data)
+                    if not (pkt.flags & CONSTANTS["FLAG_I"]):
+                        continue  # Ignorar paquetes perdidos de sesiones cerradas
+                except ValueError:
+                    continue  # Ignorar basura
+
                 # Primer datagrama de este cliente: abrir una sesión nueva
                 q = queue.Queue()
                 sessions[addr] = q

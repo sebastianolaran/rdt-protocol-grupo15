@@ -51,40 +51,56 @@ def main():
             f"download|{args.name}".encode()
         )
     connected = False
+    import time
     for attempt in range(MAX_RETRIES):
         try:
             sock.sendto(init_pkt, server_addr)
-            sock.settimeout(DEFAULT_TIMEOUT)
-            raw, _ = sock.recvfrom(MAX_PKT_SIZE)
-            resp = Packet.parse(raw)
-            if resp.flags & FLAG_I:
-                error = resp.flags & 0x0F
-                if error == ERROR_CODES["OK"]:
-                    connected = True
+            start_time = time.time()
+            
+            while time.time() - start_time < DEFAULT_TIMEOUT:
+                remaining_timeout = DEFAULT_TIMEOUT - (time.time() - start_time)
+                if remaining_timeout <= 0:
                     break
-                elif error == ERROR_CODES["FILE_NOT_FOUND"]:
-                    print("Error: archivo no encontrado en el servidor.",
-                          file=sys.stderr)
-                    sock.close()
-                    sys.exit(1)
-                elif error == ERROR_CODES["PROTO_MISMATCH"]:
-                    print("Error: protocolo no soportado por el servidor.",
-                          file=sys.stderr)
-                    sock.close()
-                    sys.exit(1)
-                elif error == ERROR_CODES["PERMISSION_DENIED"]:
-                    print("Error: sin permisos para acceder al archivo.",
-                          file=sys.stderr)
-                    sock.close()
-                    sys.exit(1)
-                else:
-                    print(f"Error del servidor: código {error}",
-                          file=sys.stderr)
-                    sock.close()
-                    sys.exit(1)
-        except (TimeoutError, OSError, ValueError):
-            if args.verbose:
-                print(f"Reintento INIT {attempt + 1}/{MAX_RETRIES}...")
+                sock.settimeout(remaining_timeout)
+                
+                try:
+                    raw, _ = sock.recvfrom(MAX_PKT_SIZE)
+                    resp = Packet.parse(raw)
+                    if resp.flags & FLAG_I:
+                        error = resp.flags & 0x0F
+                        if error == ERROR_CODES["OK"]:
+                            connected = True
+                            break
+                        elif error == ERROR_CODES["FILE_NOT_FOUND"]:
+                            print("Error: archivo no encontrado en el servidor.",
+                                  file=sys.stderr)
+                            sock.close()
+                            sys.exit(1)
+                        elif error == ERROR_CODES["PROTO_MISMATCH"]:
+                            print("Error: protocolo no soportado por el servidor.",
+                                  file=sys.stderr)
+                            sock.close()
+                            sys.exit(1)
+                        elif error == ERROR_CODES["PERMISSION_DENIED"]:
+                            print("Error: sin permisos para acceder al archivo.",
+                                  file=sys.stderr)
+                            sock.close()
+                            sys.exit(1)
+                        else:
+                            print(f"Error del servidor: código {error}",
+                                  file=sys.stderr)
+                            sock.close()
+                            sys.exit(1)
+                except (ValueError, OSError):
+                    # Ignorar paquetes de data o basura, intentar de nuevo
+                    continue
+            if connected:
+                break
+        except (TimeoutError, OSError):
+            pass
+            
+        if not connected and args.verbose:
+            print(f"Reintento INIT {attempt + 1}/{MAX_RETRIES}...")
 
     if not connected:
         print("Error: servidor no responde.", file=sys.stderr)
