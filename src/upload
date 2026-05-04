@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import socket
 import sys
+import time
 
 from lib.protocol import CONSTANTS, ERROR_CODES, Packet
 from lib.selective_repeat import SRSender
@@ -49,7 +51,6 @@ def main():
     )
 
     connected = False
-    import time
     for attempt in range(MAX_RETRIES):
         try:
             sock.sendto(init_pkt, server_addr)
@@ -110,6 +111,7 @@ def main():
     if args.verbose:
         print(f"Conectado. Subiendo '{args.src}' como '{args.name}'...")
 
+    t0 = time.time()
     try:
         if args.protocol == 'SelectiveRepeat':
             sender = SRSender(sock, server_addr, verbose=args.verbose)
@@ -122,8 +124,10 @@ def main():
         sock.close()
         sys.exit(1)
 
+    elapsed = time.time() - t0
     if not args.quiet:
-        print("Transferencia completada.")
+        size = os.path.getsize(args.src)
+        print(f"Transferencia completada en {elapsed:.2f}s ({size / elapsed / 1024:.1f} KB/s)")
     sock.close()
 
 
